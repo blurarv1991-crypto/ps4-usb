@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 #include <orbis/libkernel.h>
 #include <orbis/Sysmodule.h>
 #include <orbis/Usbd.h>
@@ -7,11 +8,15 @@
 #define EP_IN  0x81
 #define EP_OUT 0x01
 #define CAP    16384
-#define MAXH   64
-#define MAXV   30
+#define CH     16384
+#define MAXH   256
+#define MAXV   40
+#define SALIDA "/data/ps4-usb-archivo.bin"
 
 static uint8_t datos[CAP];
+static uint8_t chunk[CH];
 static uint32_t tid = 0;
+static int ruido = 1;
 
 static void wr16(uint8_t *b, uint16_t v) { b[0] = v & 0xff; b[1] = (v >> 8) & 0xff; }
 static void wr32(uint8_t *b, uint32_t v) { for (int i = 0; i < 4; i++) b[i] = (v >> (8 * i)) & 0xff; }
@@ -31,16 +36,16 @@ static int enviar(FILE *f, libusb_device_handle *h, uint16_t code, int np, uint3
     if (np > 2) wr32(b + 20, p3);
     int32_t tr = 0;
     int r = sceUsbdBulkTransfer(h, EP_OUT, b, (int32_t)len, &tr, 5000);
-    fprintf(f, "enviar 0x%04x: r=0x%x bytes=%d\n", code, r, tr);
+    if (ruido || r != 0) fprintf(f, "enviar 0x%04x: r=0x%x bytes=%d\n", code, r, tr);
     fflush(f);
     return r;
 }
 
-static int leer(libusb_device_handle *h, uint8_t *buf, int32_t *got) {
+static int leer(libusb_device_handle *h, uint8_t *buf, int32_t max, int32_t *got) {
     int r = 0;
     *got = 0;
     for (int i = 0; i < 3; i++) {
-        r = sceUsbdBulkTransfer(h, EP_IN, buf, 512, got, 5000);
+        r = sceUsbdBulkTransfer(h, EP_IN, buf, max, got, 10000);
         if (r != 0 || *got > 0) break;
     }
     return r;
@@ -49,20 +54,21 @@ static int leer(libusb_device_handle *h, uint8_t *buf, int32_t *got) {
 static int respuesta(FILE *f, libusb_device_handle *h) {
     uint8_t b[512];
     int32_t got = 0;
-    int r = leer(h, b, &got);
+    int r = leer(h, b, 512, &got);
     if (r != 0 || got < 12) {
         fprintf(f, "respuesta: r=0x%x bytes=%d\n", r, got);
         fflush(f);
         return -1;
     }
-    fprintf(f, "respuesta: tipo=%d codigo=0x%04x\n", rd16(b + 4), rd16(b + 6));
+    if (ruido || rd16(b + 6) != 0x2001)
+        fprintf(f, "respuesta: tipo=%d codigo=0x%04x\n", rd16(b + 4), rd16(b + 6));
     fflush(f);
     return rd16(b + 6);
 }
 
 static int recibir_datos(FILE *f, libusb_device_handle *h, int32_t *total) {
     int32_t got = 0;
-    int r = leer(h, datos, &got);
+    int r = leer(h, datos, 512, &got);
     if (r != 0 || got < 12) {
         fprintf(f, "datos: r=0x%x bytes=%d\n", r, got);
         fflush(f);
@@ -81,7 +87,7 @@ static int recibir_datos(FILE *f, libusb_device_handle *h, int32_t *total) {
     }
     while (got < (int32_t)largo) {
         int32_t g = 0;
-        r = leer(h, datos + got, &g);
+        r = leer(h, datos + got, 512, &g);
         if (r != 0 || g <= 0) {
             fprintf(f, "datos cortados: r=0x%x\n", r);
             fflush(f);
@@ -93,16 +99,17 @@ static int recibir_datos(FILE *f, libusb_device_handle *h, int32_t *total) {
     return 0;
 }
 
-static void mostrar(FILE *f, uint32_t handle, int32_t total) {
+/* GetObjectInfo: formato, tamano y nombre de un objeto */
+static int info(FILE *f, libusb_device_handle *h, uint32_t handle, uint16_t *fmt, uint32_t *tam, char *nombre) {
+    int32_t total = 0;
+    nombre[0] = 0;
+    if (enviar(f, h, 0x1008, 1, handle, 0, 0) != 0) return -1;
+    if (recibir_datos(f, h, &total) != 0) return -1;
     const uint8_t *p = datos + 12;
-    if (total < 12 + 53) {
-        fprintf(f, "  h=%u info corta (%d)\n", handle, total);
-        return;
-    }
-    uint16_t fmt = rd16(p + 4);
-    uint32_t tam = rd32(p + 8);
+    if (total < 12 + 53) return -1;
+    *fmt = rd16(p + 4);
+    *tam = rd32(p + 8);
     int ln = p[52];
-    char nombre[64];
     int k = 0;
     if (12 + 53 + 2 * ln <= total) {
         for (int i = 0; i < ln && k < 62; i++) {
@@ -113,8 +120,68 @@ static void mostrar(FILE *f, uint32_t handle, int32_t total) {
         }
     }
     nombre[k] = 0;
-    fprintf(f, "  h=%u %s tam=%u nombre=%s\n", handle,
-            fmt == 0x3001 ? "CARPETA" : "archivo", tam, nombre);
+    respuesta(f, h);
+    return 0;
+}
+
+/* GetObjectHandles: lista los objetos dentro de una carpeta (parent) */
+static int listar(FILE *f, libusb_device_handle *h, uint32_t parent, uint32_t *hs, uint32_t *nh, uint32_t *cuenta) {
+    int32_t total = 0;
+    *nh = 0;
+    *cuenta = 0;
+    if (enviar(f, h, 0x1007, 3, 0x00010001, 0, parent) != 0) return -1;
+    if (recibir_datos(f, h, &total) != 0) return -1;
+    *cuenta = rd32(datos + 12);
+    for (uint32_t i = 0; i < *cuenta && i < MAXH && (int32_t)(16 + 4 * i + 4) <= total; i++) {
+        hs[(*nh)++] = rd32(datos + 16 + 4 * i);
+    }
+    respuesta(f, h);
+    return 0;
+}
+
+/* GetObject: baja un archivo y lo guarda en SALIDA */
+static int bajar(FILE *f, libusb_device_handle *h, uint32_t handle, uint32_t tam) {
+    if (enviar(f, h, 0x1009, 1, handle, 0, 0) != 0) return -1;
+    FILE *o = fopen(SALIDA, "wb");
+    if (!o) {
+        fprintf(f, "no pude crear %s\n", SALIDA);
+        return -1;
+    }
+    int32_t got = 0;
+    int r = leer(h, chunk, CH, &got);
+    if (r != 0 || got < 12 || rd16(chunk + 4) != 2) {
+        fprintf(f, "bajar: r=0x%x bytes=%d tipo=%d\n", r, got, got >= 12 ? rd16(chunk + 4) : -1);
+        fclose(o);
+        return -1;
+    }
+    uint32_t falta = rd32(chunk) - 12;
+    uint32_t hecho = (uint32_t)(got - 12);
+    fwrite(chunk + 12, 1, (size_t)(got - 12), o);
+
+    char vista[61];
+    int k = 0;
+    for (int i = 12; i < got && k < 60; i++) {
+        uint8_t c = chunk[i];
+        vista[k++] = (c >= 32 && c < 127) ? (char)c : '.';
+    }
+    vista[k] = 0;
+
+    while (hecho < falta) {
+        got = 0;
+        r = leer(h, chunk, CH, &got);
+        if (r != 0 || got <= 0) {
+            fprintf(f, "bajar cortado: r=0x%x\n", r);
+            break;
+        }
+        fwrite(chunk, 1, (size_t)got, o);
+        hecho += (uint32_t)got;
+    }
+    fclose(o);
+    fprintf(f, "bajado %u de %u bytes\n", hecho, tam);
+    fprintf(f, "inicio: %s\n", vista);
+    fflush(f);
+    respuesta(f, h);
+    return 0;
 }
 
 int main(void) {
@@ -144,33 +211,61 @@ int main(void) {
             r = sceUsbdClaimInterface(h, 0);
             fprintf(f, "reclamar interfaz 0: 0x%x\n", r);
             if (r == 0) {
-                int32_t total = 0;
+                uint32_t hs[MAXH];
+                uint32_t nh = 0, cuenta = 0, dl = 0;
+                uint16_t fmt = 0;
+                uint32_t tam = 0;
+                char nombre[64];
 
                 enviar(f, h, 0x1002, 1, 1, 0, 0);
                 respuesta(f, h);
+                ruido = 0;
 
-                /* GetObjectHandles: almacenamiento, todos los formatos, raiz */
-                enviar(f, h, 0x1007, 3, 0x00010001, 0, 0xFFFFFFFF);
-                if (recibir_datos(f, h, &total) == 0) {
-                    uint32_t cuenta = rd32(datos + 12);
-                    uint32_t hs[MAXH];
-                    uint32_t nh = 0;
-                    for (uint32_t i = 0; i < cuenta && i < MAXH &&
-                         (int32_t)(16 + 4 * i + 4) <= total; i++) {
-                        hs[nh++] = rd32(datos + 16 + 4 * i);
-                    }
-                    fprintf(f, "objetos en la raiz=%u (muestro %u)\n", cuenta, nh);
-                    respuesta(f, h);
-
-                    for (uint32_t i = 0; i < nh && i < MAXV; i++) {
-                        enviar(f, h, 0x1008, 1, hs[i], 0, 0);
-                        if (recibir_datos(f, h, &total) == 0) {
-                            mostrar(f, hs[i], total);
-                            respuesta(f, h);
+                /* 1) buscar la carpeta Download en la raiz */
+                if (listar(f, h, 0xFFFFFFFF, hs, &nh, &cuenta) == 0) {
+                    fprintf(f, "raiz: %u objetos\n", cuenta);
+                    for (uint32_t i = 0; i < nh; i++) {
+                        if (info(f, h, hs[i], &fmt, &tam, nombre) != 0) continue;
+                        if (fmt == 0x3001 && strcmp(nombre, "Download") == 0) {
+                            dl = hs[i];
+                            break;
                         }
                     }
                 }
 
+                if (!dl) {
+                    fprintf(f, "no encontre la carpeta Download\n");
+                } else {
+                    /* 2) listar Download y elegir un archivo chico */
+                    uint32_t cand = 0, ctam = 0;
+                    if (listar(f, h, dl, hs, &nh, &cuenta) == 0) {
+                        fprintf(f, "Download: %u objetos (reviso %u)\n", cuenta, nh);
+                        for (uint32_t i = 0; i < nh; i++) {
+                            if (info(f, h, hs[i], &fmt, &tam, nombre) != 0) continue;
+                            if (i < MAXV)
+                                fprintf(f, "  %s tam=%u nombre=%s\n",
+                                        fmt == 0x3001 ? "CARPETA" : "archivo", tam, nombre);
+                            if (fmt != 0x3001 && strcmp(nombre, "prueba.txt") == 0) {
+                                cand = hs[i];
+                                ctam = tam;
+                                break;
+                            }
+                            if (!cand && fmt != 0x3001 && tam > 0 && tam <= 1048576) {
+                                cand = hs[i];
+                                ctam = tam;
+                            }
+                        }
+                    }
+                    /* 3) bajarlo */
+                    if (cand) {
+                        fprintf(f, "bajando objeto %u (%u bytes)\n", cand, ctam);
+                        bajar(f, h, cand, ctam);
+                    } else {
+                        fprintf(f, "no hay archivo chico en Download\n");
+                    }
+                }
+
+                ruido = 1;
                 enviar(f, h, 0x1003, 0, 0, 0, 0);
                 respuesta(f, h);
                 sceUsbdReleaseInterface(h, 0);

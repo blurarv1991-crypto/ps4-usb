@@ -8,10 +8,8 @@
 #define EP_IN  0x81
 #define EP_OUT 0x01
 #define CAP    16384
-#define CH     16384
+#define CH     262144
 #define MAXH   256
-#define MAXV   40
-#define SALIDA "/data/ps4-usb-archivo.bin"
 
 static uint8_t datos[CAP];
 static uint8_t chunk[CH];
@@ -99,7 +97,6 @@ static int recibir_datos(FILE *f, libusb_device_handle *h, int32_t *total) {
     return 0;
 }
 
-/* GetObjectInfo: formato, tamano y nombre de un objeto */
 static int info(FILE *f, libusb_device_handle *h, uint32_t handle, uint16_t *fmt, uint32_t *tam, char *nombre) {
     int32_t total = 0;
     nombre[0] = 0;
@@ -124,7 +121,6 @@ static int info(FILE *f, libusb_device_handle *h, uint32_t handle, uint16_t *fmt
     return 0;
 }
 
-/* GetObjectHandles: lista los objetos dentro de una carpeta (parent) */
 static int listar(FILE *f, libusb_device_handle *h, uint32_t parent, uint32_t *hs, uint32_t *nh, uint32_t *cuenta) {
     int32_t total = 0;
     *nh = 0;
@@ -139,46 +135,33 @@ static int listar(FILE *f, libusb_device_handle *h, uint32_t parent, uint32_t *h
     return 0;
 }
 
-/* GetObject: baja un archivo y lo guarda en SALIDA */
-static int bajar(FILE *f, libusb_device_handle *h, uint32_t handle, uint32_t tam) {
+/* Baja un archivo SIN guardarlo y mide la velocidad del USB */
+static int medir(FILE *f, libusb_device_handle *h, uint32_t handle, uint32_t tam, int32_t tamchunk) {
     if (enviar(f, h, 0x1009, 1, handle, 0, 0) != 0) return -1;
-    FILE *o = fopen(SALIDA, "wb");
-    if (!o) {
-        fprintf(f, "no pude crear %s\n", SALIDA);
-        return -1;
-    }
+    uint64_t t0 = sceKernelGetProcessTime();
     int32_t got = 0;
-    int r = leer(h, chunk, CH, &got);
+    int r = leer(h, chunk, tamchunk, &got);
     if (r != 0 || got < 12 || rd16(chunk + 4) != 2) {
-        fprintf(f, "bajar: r=0x%x bytes=%d tipo=%d\n", r, got, got >= 12 ? rd16(chunk + 4) : -1);
-        fclose(o);
+        fprintf(f, "medir: r=0x%x bytes=%d\n", r, got);
+        fflush(f);
         return -1;
     }
     uint32_t falta = rd32(chunk) - 12;
     uint32_t hecho = (uint32_t)(got - 12);
-    fwrite(chunk + 12, 1, (size_t)(got - 12), o);
-
-    char vista[61];
-    int k = 0;
-    for (int i = 12; i < got && k < 60; i++) {
-        uint8_t c = chunk[i];
-        vista[k++] = (c >= 32 && c < 127) ? (char)c : '.';
-    }
-    vista[k] = 0;
-
     while (hecho < falta) {
         got = 0;
-        r = leer(h, chunk, CH, &got);
+        r = leer(h, chunk, tamchunk, &got);
         if (r != 0 || got <= 0) {
-            fprintf(f, "bajar cortado: r=0x%x\n", r);
+            fprintf(f, "medir cortado: r=0x%x despues de %u bytes\n", r, hecho);
             break;
         }
-        fwrite(chunk, 1, (size_t)got, o);
         hecho += (uint32_t)got;
     }
-    fclose(o);
-    fprintf(f, "bajado %u de %u bytes\n", hecho, tam);
-    fprintf(f, "inicio: %s\n", vista);
+    uint64_t us = sceKernelGetProcessTime() - t0;
+    if (us == 0) us = 1;
+    unsigned long long kbs = (unsigned long long)hecho * 1000000ULL / 1024ULL / us;
+    fprintf(f, "bloque=%d: recibido %u de %u bytes en %llu ms = %llu KB/s\n",
+            tamchunk, hecho, tam, (unsigned long long)(us / 1000), kbs);
     fflush(f);
     respuesta(f, h);
     return 0;
@@ -223,7 +206,6 @@ int main(void) {
 
                 /* 1) buscar la carpeta Download en la raiz */
                 if (listar(f, h, 0xFFFFFFFF, hs, &nh, &cuenta) == 0) {
-                    fprintf(f, "raiz: %u objetos\n", cuenta);
                     for (uint32_t i = 0; i < nh; i++) {
                         if (info(f, h, hs[i], &fmt, &tam, nombre) != 0) continue;
                         if (fmt == 0x3001 && strcmp(nombre, "Download") == 0) {
@@ -236,32 +218,29 @@ int main(void) {
                 if (!dl) {
                     fprintf(f, "no encontre la carpeta Download\n");
                 } else {
-                    /* 2) listar Download y elegir un archivo chico */
+                    /* 2) buscar un .pkg de mas de 1 MB */
                     uint32_t cand = 0, ctam = 0;
                     if (listar(f, h, dl, hs, &nh, &cuenta) == 0) {
                         fprintf(f, "Download: %u objetos (reviso %u)\n", cuenta, nh);
-                        for (uint32_t i = 0; i < nh; i++) {
+                        for (uint32_t i = 0; i < nh && !cand; i++) {
                             if (info(f, h, hs[i], &fmt, &tam, nombre) != 0) continue;
-                            if (i < MAXV)
-                                fprintf(f, "  %s tam=%u nombre=%s\n",
-                                        fmt == 0x3001 ? "CARPETA" : "archivo", tam, nombre);
-                            if (fmt != 0x3001 && strcmp(nombre, "prueba.txt") == 0) {
+                            int len = (int)strlen(nombre);
+                            if (fmt != 0x3001 && tam > 1048576 && len > 4 &&
+                                strcmp(nombre + len - 4, ".pkg") == 0) {
                                 cand = hs[i];
                                 ctam = tam;
-                                break;
-                            }
-                            if (!cand && fmt != 0x3001 && tam > 0 && tam <= 1048576) {
-                                cand = hs[i];
-                                ctam = tam;
+                                fprintf(f, "elegido: %s (%u bytes)\n", nombre, tam);
                             }
                         }
                     }
-                    /* 3) bajarlo */
+
+                    /* 3) medir la velocidad con dos tamanos de bloque */
                     if (cand) {
-                        fprintf(f, "bajando objeto %u (%u bytes)\n", cand, ctam);
-                        bajar(f, h, cand, ctam);
+                        ruido = 1;
+                        medir(f, h, cand, ctam, 65536);
+                        medir(f, h, cand, ctam, 262144);
                     } else {
-                        fprintf(f, "no hay archivo chico en Download\n");
+                        fprintf(f, "no encontre un .pkg grande en Download\n");
                     }
                 }
 

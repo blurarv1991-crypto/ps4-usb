@@ -12,14 +12,14 @@
 static FILE *f;
 #define LOG(...) do { fprintf(f, __VA_ARGS__); fflush(f); } while (0)
 
-static int conectar(int puerto) {
+static int conectar(int puerto, int espera) {
     int s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) {
         LOG("puerto %d: no pude crear socket (errno=%d)\n", puerto, errno);
         return -1;
     }
     struct timeval tv;
-    tv.tv_sec = 3;
+    tv.tv_sec = espera;
     tv.tv_usec = 0;
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
@@ -39,42 +39,53 @@ static int conectar(int puerto) {
     return s;
 }
 
+/* Conecta, manda "envio" (si hay) y anota lo que conteste */
+static void sondear(const char *nombre, int puerto, const char *envio, int espera) {
+    LOG("--- %s ---\n", nombre);
+    int s = conectar(puerto, espera);
+    if (s < 0) return;
+
+    if (envio) {
+        ssize_t w = send(s, envio, strlen(envio), 0);
+        LOG("  enviado: %d bytes (errno=%d)\n", (int)w, w < 0 ? errno : 0);
+    }
+
+    char resp[500];
+    ssize_t r = recv(s, resp, sizeof(resp) - 1, 0);
+    if (r <= 0) {
+        LOG("  recibido: %d bytes (errno=%d)\n", (int)r, errno);
+    } else {
+        for (int k = 0; k < r; k++) {
+            if (resp[k] < 32 || resp[k] > 126) resp[k] = '.';
+        }
+        resp[r] = 0;
+        LOG("  recibido: %d bytes: %s\n", (int)r, resp);
+    }
+    close(s);
+}
+
 int main(void) {
     f = fopen("/data/ps4-usb-red.txt", "w");
     if (!f) return 1;
     LOG("inicio\n");
 
-    int puertos[] = {12800, 9090, 9021, 9020, 2121, 3232};
-    int n = (int)(sizeof(puertos) / sizeof(puertos[0]));
+    /* Control: el FTP de GoldHEN saluda solo al conectar */
+    sondear("FTP 2121 (control)", 2121, NULL, 5);
 
-    for (int i = 0; i < n; i++) {
-        int s = conectar(puertos[i]);
-        if (s < 0) continue;
+    /* 12800: primero una peticion simple */
+    sondear("12800 GET /", 12800,
+            "GET / HTTP/1.1\r\nHost: 127.0.0.1:12800\r\nConnection: close\r\n\r\n", 10);
 
-        if (puertos[i] == 12800) {
-            /* Pregunta inofensiva al Remote Package Installer: "existe esta app?" */
-            const char *cuerpo = "{\"title_id\":\"CUSA09311\"}";
-            char req[300];
-            snprintf(req, sizeof(req),
-                     "POST /api/is_exists HTTP/1.1\r\nHost: 127.0.0.1\r\n"
-                     "Content-Length: %d\r\nConnection: close\r\n\r\n%s",
-                     (int)strlen(cuerpo), cuerpo);
-            ssize_t w = send(s, req, strlen(req), 0);
-            LOG("  enviado: %d bytes\n", (int)w);
-
-            char resp[400];
-            ssize_t r = recv(s, resp, sizeof(resp) - 1, 0);
-            LOG("  recibido: %d bytes\n", (int)r);
-            if (r > 0) {
-                for (int k = 0; k < r; k++) {
-                    if (resp[k] < 32 || resp[k] > 126) resp[k] = '.';
-                }
-                resp[r] = 0;
-                LOG("  respuesta: %s\n", resp);
-            }
-        }
-        close(s);
-    }
+    /* 12800: la pregunta is_exists escrita como lo hace curl */
+    const char *cuerpo = "{\"title_id\":\"CUSA09311\"}";
+    char req[400];
+    snprintf(req, sizeof(req),
+             "POST /api/is_exists HTTP/1.1\r\nHost: 127.0.0.1:12800\r\n"
+             "User-Agent: curl/7.68.0\r\nAccept: */*\r\n"
+             "Content-Length: %d\r\n"
+             "Content-Type: application/x-www-form-urlencoded\r\n\r\n%s",
+             (int)strlen(cuerpo), cuerpo);
+    sondear("12800 POST is_exists", 12800, req, 10);
 
     LOG("fin\n");
     fclose(f);

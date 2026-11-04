@@ -1,0 +1,92 @@
+name: Pkg USB
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'main.c'
+      - '.github/workflows/pkg.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  pkg:
+    runs-on: ubuntu-latest
+    env:
+      OO_VERSION: v0.5.4
+      OO_PS4_TOOLCHAIN: ${{ github.workspace }}/OpenOrbis
+      DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: "1"
+      DOTNET_ROLL_FORWARD: Major
+    steps:
+      - name: Traer mi codigo
+        uses: actions/checkout@v4
+
+      - name: Descargar toolchain
+        run: |
+          curl -s -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/tags/$OO_VERSION | grep browser_download_url | cut -d '"' -f 4 > assets.txt
+          URL=$(grep -i linux assets.txt | head -1)
+          if [ -z "$URL" ]; then URL=$(grep -E '\.(tar\.gz|zip)$' assets.txt | head -1); fi
+          echo "Usando: $URL"
+          curl -L --fail -o toolchain.dl "$URL"
+          mkdir -p "$OO_PS4_TOOLCHAIN"
+          case "$URL" in
+            *.zip) unzip -q toolchain.dl -d "$OO_PS4_TOOLCHAIN" ;;
+            *) tar -xzf toolchain.dl -C "$OO_PS4_TOOLCHAIN" ;;
+          esac
+          F=$(find "$OO_PS4_TOOLCHAIN" -maxdepth 4 -name link.x | head -1)
+          if [ -z "$F" ]; then echo "No encontre link.x"; exit 1; fi
+          ROOT=$(dirname "$F")
+          if [ "$ROOT" != "$OO_PS4_TOOLCHAIN" ]; then cp -a "$ROOT"/. "$OO_PS4_TOOLCHAIN"/; fi
+          chmod -R +x "$OO_PS4_TOOLCHAIN/bin" || true
+          ls "$OO_PS4_TOOLCHAIN/bin/linux"
+
+      - name: Descargar samples
+        run: git clone --depth 1 --branch "$OO_VERSION" https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git src
+
+      - name: Instalar libssl1.1 y lld
+        run: |
+          wget -q http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb || wget -q http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb
+          sudo dpkg -i libssl1.1_*.deb
+          sudo apt-get update
+          sudo apt-get install -y clang lld
+
+      - name: Compilar
+        run: |
+          OO=$OO_PS4_TOOLCHAIN
+          clang --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c -isysroot $OO -isystem $OO/include -o main.o main.c
+          ld.lld -m elf_x86_64 -pie --script $OO/link.x --eh-frame-hdr -L$OO/lib $OO/lib/crt1.o main.o -lc -lkernel -o main.elf
+          ls -la main.elf
+
+      - name: Empaquetar
+        run: |
+          OO=$OO_PS4_TOOLCHAIN
+          T=$OO/bin/linux
+          CID=IV0000-BREW00092_00-PS4USB0000000000
+          mkdir -p work/sce_sys/about work/sce_module
+          cp main.elf work/main.elf
+          cd work
+          if [ -f ../icon0.png ]; then cp ../icon0.png sce_sys/icon0.png; else cp ../src/samples/SDL2/sce_sys/icon0.png sce_sys/icon0.png; fi
+          cp "$(find "$OO" ../src -name right.sprx | head -1)" sce_sys/about/right.sprx
+          for f in libc.prx libSceFios2.prx; do cp "$(find "$OO" ../src -name $f | head -1)" sce_module/$f; done
+          $T/create-fself -in=main.elf -out=main.oelf --eboot "eboot.bin" --paid 0x3800000000000011
+          $T/PkgTool.Core sfo_new sce_sys/param.sfo
+          $T/PkgTool.Core sfo_setentry sce_sys/param.sfo APP_TYPE --type Integer --maxsize 4 --value 1
+          $T/PkgTool.Core sfo_setentry sce_sys/param.sfo APP_VER --type Utf8 --maxsize 8 --value '1.00'
+          $T/PkgTool.Core sfo_setentry sce_sys/param.sfo ATTRIBUTE --type Integer --maxsize 4 --value 0
+          $T/PkgTool.Core sfo_setentry sce_sys/param.sfo CATEGORY --type Utf8 --maxsize 4 --value 'gd'
+          $T/PkgTool.Core sfo_setentry sce_sys/param.sfo CONTENT_ID --type Utf8 --maxsize 48 --value "$CID"
+          $T/PkgTool.Core sfo_setentry sce_sys/param.sfo DOWNLOAD_DATA_SIZE --type Integer --maxsize 4 --value 0
+          $T/PkgTool.Core sfo_setentry sce_sys/param.sfo SYSTEM_VER --type Integer --maxsize 4 --value 0
+          $T/PkgTool.Core sfo_setentry sce_sys/param.sfo TITLE --type Utf8 --maxsize 128 --value 'PS4 USB'
+          $T/PkgTool.Core sfo_setentry sce_sys/param.sfo TITLE_ID --type Utf8 --maxsize 12 --value 'BREW00092'
+          $T/PkgTool.Core sfo_setentry sce_sys/param.sfo VERSION --type Utf8 --maxsize 8 --value '1.00'
+          $T/create-gp4 -out pkg.gp4 --content-id=$CID --files "eboot.bin sce_sys/about/right.sprx sce_sys/param.sfo sce_sys/icon0.png sce_module/libc.prx sce_module/libSceFios2.prx"
+          $T/PkgTool.Core pkg_build pkg.gp4 .
+          ls -la
+
+      - name: Subir artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps4-usb-pkg
+          path: work/*.pkg

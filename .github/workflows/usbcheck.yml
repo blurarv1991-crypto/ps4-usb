@@ -10,25 +10,22 @@ jobs:
   ver:
     runs-on: ubuntu-latest
     steps:
-      - name: Detalle USB 2
+      - name: Buscar instalacion y red
         run: |
           git clone --depth 1 --branch v0.5.4 https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git src
           curl -s -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/tags/v0.5.4 | grep browser_download_url | cut -d '"' -f 4 > assets.txt
           URL=$(grep -i linux assets.txt | head -1)
           if [ -z "$URL" ]; then URL=$(grep -E '\.(tar\.gz|zip)$' assets.txt | head -1); fi
-          curl -L --fail -o tc.dl "$URL"
+          curl -sL --fail -o tc.dl "$URL"
           mkdir tc
           case "$URL" in
             *.zip) unzip -q tc.dl -d tc ;;
             *) tar -xzf tc.dl -C tc ;;
           esac
-          echo "=== Libs usb en toolchain ==="
-          find tc -iname "*usb*" | head -20
-          echo "=== Libs en lib/ ==="
-          find tc -maxdepth 3 -path "*lib*" -name "libSce*" | head -40
-          echo "=== libusb.h: descriptor ==="
-          grep -n -A 22 "struct libusb_device_descriptor" src/include/orbis/_types/libusb.h | head -40
-          echo "=== Usbd.h cabecera ==="
-          sed -n 1,12p src/include/orbis/Usbd.h
-          echo "=== sysmodule usb ==="
-          grep -niE "usb" src/include/orbis/_types/sysmodule.h src/include/orbis/Sysmodule.h | head -10
+          echo "=== RESULTADO ==="
+          echo "--- Headers con install/bgft/appinst ---"
+          grep -rliE "bgft|appinst|AppInstUtil|PackageInstall" src/include | head -20
+          echo "--- Headers de red ---"
+          ls src/include/orbis | grep -iE "net|http|ssl" 
+          echo "--- Libs relacionadas ---"
+          find tc -name "libSce*" | grep -iE "bgft|appinst|net|http|sysmodule" | sed 's#.*/##' | sort

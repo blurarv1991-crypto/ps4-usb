@@ -10,15 +10,18 @@ jobs:
   ver:
     runs-on: ubuntu-latest
     steps:
-      - name: Detalle de Net
+      - name: Ejemplo de red
         run: |
           git clone --depth 1 --branch v0.5.4 https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git src
-          I=src/include/orbis
+          S=src/samples/networking
           echo "=== RESULTADO ==="
-          echo "--- Net.h: funciones clave ---"
-          grep -nE "sceNet(Init|Term|PoolCreate|PoolDestroy|Socket|SocketClose|Connect|Bind|Listen|Accept|Send|Recv|Htons|Htonl|InetPton|Setsockopt)\b" $I/Net.h
-          echo "--- structs de red ---"
-          grep -rnE "struct .*Sockaddr|OrbisNetSockaddr|ORBIS_NET_(AF_INET|SOCK_STREAM|IPPROTO_TCP)" $I/_types/net.h $I/Net.h | head -30
-          echo "--- samples con red ---"
-          ls src/samples
-          grep -rlE "sceNetSocket|socket\(" src/samples | head -10
+          echo "--- archivos del ejemplo ---"
+          find $S -type f | head -20
+          echo "--- main.cpp ---"
+          head -120 $S/networking/main.cpp
+          echo "--- Makefile (librerias) ---"
+          grep -nE "LIBS|-l" $S/Makefile | head -10
+          echo "--- structs en net.h ---"
+          sed -n 20,60p src/include/orbis/_types/net.h
+          echo "--- sysmodule NET ---"
+          grep -nE "INTERNAL_NET|SYSMODULE_NET" src/include/orbis/_types/sysmodule.h

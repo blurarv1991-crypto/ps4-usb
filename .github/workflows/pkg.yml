@@ -59,7 +59,7 @@ jobs:
           if [ -z "$LUSB" ]; then echo "No encontre libusb.h"; exit 1; fi
           LDIR=$(dirname "$LUSB")
           clang --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c -isysroot $OO -isystem $OO/include -isystem "$LDIR" -o main.o main.c
-          ld.lld -m elf_x86_64 -pie --script $OO/link.x --eh-frame-hdr -L$OO/lib $OO/lib/crt1.o main.o -lc -lkernel -lSceSysmodule -lSceUsbd -o main.elf
+          ld.lld -m elf_x86_64 -pie --script $OO/link.x --eh-frame-hdr -L$OO/lib $OO/lib/crt1.o main.o -lc -lkernel -lSceSysmodule -lSceUsbd -lSceAppInstUtil -o main.elf
           ls -la main.elf
 
       - name: Empaquetar

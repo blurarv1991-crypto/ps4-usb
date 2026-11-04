@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <orbis/libkernel.h>
 #include <orbis/Sysmodule.h>
 #include <orbis/Usbd.h>
@@ -10,6 +11,8 @@
 #define CAP    16384
 #define CH     262144
 #define MAXH   256
+#define CARPETA_PKG "/data/pkg"
+#define RUTA_PKG    "/data/pkg/ps4-usb-prueba.pkg"
 
 static uint8_t datos[CAP];
 static uint8_t chunk[CH];
@@ -20,6 +23,11 @@ static void wr16(uint8_t *b, uint16_t v) { b[0] = v & 0xff; b[1] = (v >> 8) & 0x
 static void wr32(uint8_t *b, uint32_t v) { for (int i = 0; i < 4; i++) b[i] = (v >> (8 * i)) & 0xff; }
 static uint16_t rd16(const uint8_t *b) { return (uint16_t)(b[0] | (b[1] << 8)); }
 static uint32_t rd32(const uint8_t *b) { return b[0] | (b[1] << 8) | (b[2] << 16) | ((uint32_t)b[3] << 24); }
+
+static unsigned long long kbs(uint64_t bytes, uint64_t us) {
+    if (us == 0) us = 1;
+    return (unsigned long long)(bytes * 1000000ULL / 1024ULL / us);
+}
 
 static int enviar(FILE *f, libusb_device_handle *h, uint16_t code, int np, uint32_t p1, uint32_t p2, uint32_t p3) {
     uint8_t b[24];
@@ -135,33 +143,59 @@ static int listar(FILE *f, libusb_device_handle *h, uint32_t parent, uint32_t *h
     return 0;
 }
 
-/* Baja un archivo SIN guardarlo y mide la velocidad del USB */
-static int medir(FILE *f, libusb_device_handle *h, uint32_t handle, uint32_t tam, int32_t tamchunk) {
-    if (enviar(f, h, 0x1009, 1, handle, 0, 0) != 0) return -1;
+/* Baja un archivo y lo guarda en la PS4, midiendo USB y escritura por separado */
+static int guardar(FILE *f, libusb_device_handle *h, uint32_t handle, uint32_t tam, const char *ruta) {
+    FILE *o = fopen(ruta, "wb");
+    if (!o) {
+        fprintf(f, "no pude crear %s\n", ruta);
+        return -1;
+    }
+    if (enviar(f, h, 0x1009, 1, handle, 0, 0) != 0) {
+        fclose(o);
+        return -1;
+    }
     uint64_t t0 = sceKernelGetProcessTime();
+    uint64_t tw = 0;
     int32_t got = 0;
-    int r = leer(h, chunk, tamchunk, &got);
+    int r = leer(h, chunk, CH, &got);
     if (r != 0 || got < 12 || rd16(chunk + 4) != 2) {
-        fprintf(f, "medir: r=0x%x bytes=%d\n", r, got);
-        fflush(f);
+        fprintf(f, "guardar: r=0x%x bytes=%d\n", r, got);
+        fclose(o);
         return -1;
     }
     uint32_t falta = rd32(chunk) - 12;
     uint32_t hecho = (uint32_t)(got - 12);
+    uint64_t a = sceKernelGetProcessTime();
+    size_t w = fwrite(chunk + 12, 1, (size_t)(got - 12), o);
+    tw += sceKernelGetProcessTime() - a;
+    if (w != (size_t)(got - 12)) fprintf(f, "error escribiendo\n");
+
     while (hecho < falta) {
         got = 0;
-        r = leer(h, chunk, tamchunk, &got);
+        r = leer(h, chunk, CH, &got);
         if (r != 0 || got <= 0) {
-            fprintf(f, "medir cortado: r=0x%x despues de %u bytes\n", r, hecho);
+            fprintf(f, "guardar cortado: r=0x%x despues de %u bytes\n", r, hecho);
+            break;
+        }
+        a = sceKernelGetProcessTime();
+        w = fwrite(chunk, 1, (size_t)got, o);
+        tw += sceKernelGetProcessTime() - a;
+        if (w != (size_t)got) {
+            fprintf(f, "error escribiendo despues de %u bytes\n", hecho);
             break;
         }
         hecho += (uint32_t)got;
     }
-    uint64_t us = sceKernelGetProcessTime() - t0;
-    if (us == 0) us = 1;
-    unsigned long long kbs = (unsigned long long)hecho * 1000000ULL / 1024ULL / us;
-    fprintf(f, "bloque=%d: recibido %u de %u bytes en %llu ms = %llu KB/s\n",
-            tamchunk, hecho, tam, (unsigned long long)(us / 1000), kbs);
+    a = sceKernelGetProcessTime();
+    fclose(o);
+    tw += sceKernelGetProcessTime() - a;
+
+    uint64_t total = sceKernelGetProcessTime() - t0;
+    uint64_t tusb = total > tw ? total - tw : 1;
+    fprintf(f, "guardado %u de %u bytes en %s\n", hecho, tam, ruta);
+    fprintf(f, "total: %llu ms = %llu KB/s\n", (unsigned long long)(total / 1000), kbs(hecho, total));
+    fprintf(f, "tiempo USB: %llu ms = %llu KB/s\n", (unsigned long long)(tusb / 1000), kbs(hecho, tusb));
+    fprintf(f, "tiempo escribiendo: %llu ms = %llu KB/s\n", (unsigned long long)(tw / 1000), kbs(hecho, tw));
     fflush(f);
     respuesta(f, h);
     return 0;
@@ -204,7 +238,6 @@ int main(void) {
                 respuesta(f, h);
                 ruido = 0;
 
-                /* 1) buscar la carpeta Download en la raiz */
                 if (listar(f, h, 0xFFFFFFFF, hs, &nh, &cuenta) == 0) {
                     for (uint32_t i = 0; i < nh; i++) {
                         if (info(f, h, hs[i], &fmt, &tam, nombre) != 0) continue;
@@ -218,7 +251,6 @@ int main(void) {
                 if (!dl) {
                     fprintf(f, "no encontre la carpeta Download\n");
                 } else {
-                    /* 2) buscar un .pkg de mas de 1 MB */
                     uint32_t cand = 0, ctam = 0;
                     if (listar(f, h, dl, hs, &nh, &cuenta) == 0) {
                         fprintf(f, "Download: %u objetos (reviso %u)\n", cuenta, nh);
@@ -234,11 +266,10 @@ int main(void) {
                         }
                     }
 
-                    /* 3) medir la velocidad con dos tamanos de bloque */
                     if (cand) {
                         ruido = 1;
-                        medir(f, h, cand, ctam, 65536);
-                        medir(f, h, cand, ctam, 262144);
+                        mkdir(CARPETA_PKG, 0777);
+                        guardar(f, h, cand, ctam, RUTA_PKG);
                     } else {
                         fprintf(f, "no encontre un .pkg grande en Download\n");
                     }

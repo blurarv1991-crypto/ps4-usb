@@ -10,18 +10,15 @@ jobs:
   ver:
     runs-on: ubuntu-latest
     steps:
-      - name: Detalle de Bgft y AppInstUtil
+      - name: Detalle de Net
         run: |
           git clone --depth 1 --branch v0.5.4 https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git src
           I=src/include/orbis
           echo "=== RESULTADO ==="
-          echo "--- Bgft.h ---"
-          cat $I/Bgft.h
-          echo "--- AppInstUtil.h ---"
-          cat $I/AppInstUtil.h
-          echo "--- _types/bgft.h ---"
-          head -150 $I/_types/bgft.h
-          echo "--- _types/appinst_util.h ---"
-          head -150 $I/_types/appinst_util.h
-          echo "--- sysmodule ---"
-          grep -niE "bgft|appinst" $I/_types/sysmodule.h
+          echo "--- Net.h: funciones clave ---"
+          grep -nE "sceNet(Init|Term|PoolCreate|PoolDestroy|Socket|SocketClose|Connect|Bind|Listen|Accept|Send|Recv|Htons|Htonl|InetPton|Setsockopt)\b" $I/Net.h
+          echo "--- structs de red ---"
+          grep -rnE "struct .*Sockaddr|OrbisNetSockaddr|ORBIS_NET_(AF_INET|SOCK_STREAM|IPPROTO_TCP)" $I/_types/net.h $I/Net.h | head -30
+          echo "--- samples con red ---"
+          ls src/samples
+          grep -rlE "sceNetSocket|socket\(" src/samples | head -10

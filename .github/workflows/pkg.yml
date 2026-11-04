@@ -54,7 +54,11 @@ jobs:
       - name: Compilar
         run: |
           OO=$OO_PS4_TOOLCHAIN
-          clang --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c -isysroot $OO -isystem $OO/include -isystem $OO/include/orbis/_types -o main.o main.c
+          LUSB=$(find "$OO" src/include -name libusb.h | head -1)
+          echo "libusb.h en: $LUSB"
+          if [ -z "$LUSB" ]; then echo "No encontre libusb.h"; exit 1; fi
+          LDIR=$(dirname "$LUSB")
+          clang --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c -isysroot $OO -isystem $OO/include -isystem "$LDIR" -o main.o main.c
           ld.lld -m elf_x86_64 -pie --script $OO/link.x --eh-frame-hdr -L$OO/lib $OO/lib/crt1.o main.o -lc -lkernel -lSceSysmodule -lSceUsbd -o main.elf
           ls -la main.elf
 

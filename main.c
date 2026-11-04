@@ -4,18 +4,41 @@
 #include <orbis/Sysmodule.h>
 #include <orbis/Usbd.h>
 
-struct libusb_endpoint_descriptor {
-    uint8_t bLength;
-    uint8_t bDescriptorType;
-    uint8_t bEndpointAddress;
-    uint8_t bmAttributes;
-    uint16_t wMaxPacketSize;
-    uint8_t bInterval;
-    uint8_t bRefresh;
-    uint8_t bSynchAddress;
-    const unsigned char *extra;
-    int extra_length;
-};
+#define EP_IN  0x81
+#define EP_OUT 0x01
+
+static void wr16(uint8_t *b, uint16_t v) { b[0] = v & 0xff; b[1] = (v >> 8) & 0xff; }
+static void wr32(uint8_t *b, uint32_t v) { for (int i = 0; i < 4; i++) b[i] = (v >> (8 * i)) & 0xff; }
+static uint16_t rd16(const uint8_t *b) { return (uint16_t)(b[0] | (b[1] << 8)); }
+static uint32_t rd32(const uint8_t *b) { return b[0] | (b[1] << 8) | (b[2] << 16) | ((uint32_t)b[3] << 24); }
+
+static int enviar(FILE *f, libusb_device_handle *h, uint16_t code, uint32_t tid, int np, uint32_t p1) {
+    uint8_t b[16];
+    uint32_t len = 12 + 4 * np;
+    wr32(b, len);
+    wr16(b + 4, 1);
+    wr16(b + 6, code);
+    wr32(b + 8, tid);
+    if (np) wr32(b + 12, p1);
+    int32_t tr = 0;
+    int r = sceUsbdBulkTransfer(h, EP_OUT, b, (int32_t)len, &tr, 5000);
+    fprintf(f, "enviar 0x%04x: r=0x%x bytes=%d\n", code, r, tr);
+    fflush(f);
+    return r;
+}
+
+static int recibir(FILE *f, libusb_device_handle *h, uint8_t *buf, int32_t *got) {
+    *got = 0;
+    int r = sceUsbdBulkTransfer(h, EP_IN, buf, 512, got, 5000);
+    if (r != 0 || *got < 12) {
+        fprintf(f, "recibir: r=0x%x bytes=%d\n", r, *got);
+        fflush(f);
+        return -1;
+    }
+    fprintf(f, "recibido: bytes=%d tipo=%d codigo=0x%04x\n", *got, rd16(buf + 4), rd16(buf + 6));
+    fflush(f);
+    return 0;
+}
 
 int main(void) {
     FILE *f = fopen("/data/ps4-usb.txt", "w");
@@ -28,59 +51,47 @@ int main(void) {
     libusb_device **lista = NULL;
     int n = sceUsbdGetDeviceList(&lista);
     fprintf(f, "dispositivos=%d\n", n);
-    fflush(f);
 
-    libusb_device *mtp = NULL;
-    int mtp_if = -1;
-
+    libusb_device *cel = NULL;
     for (int j = 0; j < n; j++) {
         struct libusb_device_descriptor d;
         if (sceUsbdGetDeviceDescriptor(lista[j], &d) != 0) continue;
-        fprintf(f, "dispositivo %d: VID=%04x PID=%04x\n", j, d.idVendor, d.idProduct);
-
-        struct libusb_config_descriptor *c = NULL;
-        r = sceUsbdGetActiveConfigDescriptor(lista[j], &c);
-        if (r != 0 || !c) {
-            fprintf(f, "  sin config: 0x%x\n", r);
-            continue;
-        }
-
-        for (int i = 0; i < c->bNumInterfaces; i++) {
-            const struct libusb_interface *itf = &c->interface[i];
-            for (int a = 0; a < itf->num_altsetting; a++) {
-                const struct libusb_interface_descriptor *id = &itf->altsetting[a];
-                fprintf(f, "  interfaz %d clase=%02x sub=%02x proto=%02x endpoints=%d\n",
-                        id->bInterfaceNumber, id->bInterfaceClass,
-                        id->bInterfaceSubClass, id->bInterfaceProtocol,
-                        id->bNumEndpoints);
-                for (int e = 0; e < id->bNumEndpoints; e++) {
-                    const struct libusb_endpoint_descriptor *ep = &id->endpoint[e];
-                    fprintf(f, "    ep=%02x tipo=%02x max=%d\n",
-                            ep->bEndpointAddress, ep->bmAttributes, ep->wMaxPacketSize);
-                }
-                if (d.idVendor == 0x2717 && !mtp &&
-                    (id->bInterfaceClass == 0x06 || id->bInterfaceClass == 0xff)) {
-                    mtp = lista[j];
-                    mtp_if = id->bInterfaceNumber;
-                }
-            }
-        }
-        sceUsbdFreeConfigDescriptor(c);
-        fflush(f);
+        if (d.idVendor == 0x2717) { cel = lista[j]; break; }
     }
 
-    if (mtp) {
+    if (cel) {
         libusb_device_handle *h = NULL;
-        r = sceUsbdOpen(mtp, &h);
+        r = sceUsbdOpen(cel, &h);
         fprintf(f, "abrir celular: 0x%x\n", r);
         if (r == 0 && h) {
-            r = sceUsbdClaimInterface(h, mtp_if);
-            fprintf(f, "reclamar interfaz %d: 0x%x\n", mtp_if, r);
-            if (r == 0) sceUsbdReleaseInterface(h, mtp_if);
+            r = sceUsbdClaimInterface(h, 0);
+            fprintf(f, "reclamar interfaz 0: 0x%x\n", r);
+            if (r == 0) {
+                uint8_t buf[512];
+                int32_t got = 0;
+
+                /* OpenSession (0x1002), sesion 1. Respuesta buena: 0x2001 */
+                enviar(f, h, 0x1002, 1, 1, 1);
+                recibir(f, h, buf, &got);
+
+                /* GetStorageIDs (0x1004) */
+                enviar(f, h, 0x1004, 2, 0, 0);
+                if (recibir(f, h, buf, &got) == 0) {
+                    if (rd16(buf + 4) == 2 && got >= 16) {
+                        uint32_t cuenta = rd32(buf + 12);
+                        fprintf(f, "almacenamientos=%u\n", cuenta);
+                        for (uint32_t i = 0; i < cuenta && (int32_t)(16 + 4 * i + 4) <= got; i++) {
+                            fprintf(f, "  id=0x%08x\n", rd32(buf + 16 + 4 * i));
+                        }
+                        recibir(f, h, buf, &got);
+                    }
+                }
+                sceUsbdReleaseInterface(h, 0);
+            }
             sceUsbdClose(h);
         }
     } else {
-        fprintf(f, "no encontre interfaz MTP en el celular\n");
+        fprintf(f, "no encontre el celular\n");
     }
 
     if (n >= 0) sceUsbdFreeDeviceList(lista);

@@ -4,6 +4,19 @@
 #include <orbis/Sysmodule.h>
 #include <orbis/Usbd.h>
 
+struct libusb_endpoint_descriptor {
+    uint8_t bLength;
+    uint8_t bDescriptorType;
+    uint8_t bEndpointAddress;
+    uint8_t bmAttributes;
+    uint16_t wMaxPacketSize;
+    uint8_t bInterval;
+    uint8_t bRefresh;
+    uint8_t bSynchAddress;
+    const unsigned char *extra;
+    int extra_length;
+};
+
 int main(void) {
     FILE *f = fopen("/data/ps4-usb.txt", "w");
     if (!f) return 1;

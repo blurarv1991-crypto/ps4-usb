@@ -5,6 +5,8 @@
 #include <orbis/libkernel.h>
 #include <orbis/Sysmodule.h>
 #include <orbis/Usbd.h>
+#include <stdbool.h>
+#include <orbis/AppInstUtil.h>
 
 #define EP_IN  0x81
 #define EP_OUT 0x01
@@ -201,6 +203,35 @@ static int guardar(FILE *f, libusb_device_handle *h, uint32_t handle, uint32_t t
     return 0;
 }
 
+/* Le pide a la PS4 que instale el .pkg guardado, y anota cada paso */
+static void instalar(FILE *f, const char *ruta) {
+    int r = sceSysmoduleLoadModuleInternal(ORBIS_SYSMODULE_INTERNAL_APP_INST_UTIL);
+    fprintf(f, "cargar AppInstUtil: 0x%x\n", r);
+    r = sceAppInstUtilInitialize();
+    fprintf(f, "AppInstUtil init: 0x%x\n", r);
+
+    char titleId[64];
+    memset(titleId, 0, sizeof(titleId));
+    int32_t esApp = 0;
+    r = sceAppInstUtilGetTitleIdFromPkg(ruta, titleId, &esApp);
+    fprintf(f, "titulo del pkg: 0x%x titleId=%s esApp=%d\n", r, titleId, esApp);
+
+    int32_t existe = -1;
+    r = sceAppInstUtilAppExists(titleId, &existe);
+    fprintf(f, "ya instalado antes: 0x%x existe=%d\n", r, existe);
+    fflush(f);
+
+    r = sceAppInstUtilAppInstallPkg(ruta, NULL);
+    fprintf(f, "pedir instalacion: 0x%x\n", r);
+    fflush(f);
+
+    sceKernelUsleep(8000000);
+    existe = -1;
+    r = sceAppInstUtilAppExists(titleId, &existe);
+    fprintf(f, "instalado despues: 0x%x existe=%d\n", r, existe);
+    fflush(f);
+}
+
 int main(void) {
     FILE *f = fopen("/data/ps4-usb.txt", "w");
     if (!f) return 1;
@@ -269,7 +300,9 @@ int main(void) {
                     if (cand) {
                         ruido = 1;
                         mkdir(CARPETA_PKG, 0777);
-                        guardar(f, h, cand, ctam, RUTA_PKG);
+                        if (guardar(f, h, cand, ctam, RUTA_PKG) == 0) {
+                            instalar(f, RUTA_PKG);
+                        }
                     } else {
                         fprintf(f, "no encontre un .pkg grande en Download\n");
                     }

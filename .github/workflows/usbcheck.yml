@@ -1,0 +1,21 @@
+name: Ver USB
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/usbcheck.yml'
+
+jobs:
+  ver:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Buscar USB en el toolchain
+        run: |
+          git clone --depth 1 --branch v0.5.4 https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git src
+          echo "=== Headers con usb ==="
+          grep -ril usb src/include | head -30
+          echo "=== Funciones sceUsbd ==="
+          grep -rhoi "sceUsbd[A-Za-z0-9_]*" src/include | sort -u | head -60
+          echo "=== Libs usb ==="
+          find src -iname "*usb*" | head -30

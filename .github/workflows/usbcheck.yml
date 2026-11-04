@@ -10,22 +10,18 @@ jobs:
   ver:
     runs-on: ubuntu-latest
     steps:
-      - name: Buscar instalacion y red
+      - name: Detalle de Bgft y AppInstUtil
         run: |
           git clone --depth 1 --branch v0.5.4 https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain.git src
-          curl -s -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/tags/v0.5.4 | grep browser_download_url | cut -d '"' -f 4 > assets.txt
-          URL=$(grep -i linux assets.txt | head -1)
-          if [ -z "$URL" ]; then URL=$(grep -E '\.(tar\.gz|zip)$' assets.txt | head -1); fi
-          curl -sL --fail -o tc.dl "$URL"
-          mkdir tc
-          case "$URL" in
-            *.zip) unzip -q tc.dl -d tc ;;
-            *) tar -xzf tc.dl -C tc ;;
-          esac
+          I=src/include/orbis
           echo "=== RESULTADO ==="
-          echo "--- Headers con install/bgft/appinst ---"
-          grep -rliE "bgft|appinst|AppInstUtil|PackageInstall" src/include | head -20
-          echo "--- Headers de red ---"
-          ls src/include/orbis | grep -iE "net|http|ssl" 
-          echo "--- Libs relacionadas ---"
-          find tc -name "libSce*" | grep -iE "bgft|appinst|net|http|sysmodule" | sed 's#.*/##' | sort
+          echo "--- Bgft.h ---"
+          cat $I/Bgft.h
+          echo "--- AppInstUtil.h ---"
+          cat $I/AppInstUtil.h
+          echo "--- _types/bgft.h ---"
+          head -150 $I/_types/bgft.h
+          echo "--- _types/appinst_util.h ---"
+          head -150 $I/_types/appinst_util.h
+          echo "--- sysmodule ---"
+          grep -niE "bgft|appinst" $I/_types/sysmodule.h

@@ -38,8 +38,6 @@ typedef struct {
     char message[3075];
 } notify_request_t;
 
-int sceKernelSendNotificationRequest(int dev, notify_request_t *req, size_t size, int blocking);
-
 static unsigned long long g_kbs = 0;
 
 /* Muestra un mensaje en pantalla (notificacion de la PS4) */
@@ -50,7 +48,7 @@ static void avisa(const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(req.message, 200, fmt, ap);
     va_end(ap);
-    sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+    sceKernelSendNotificationRequest(0, (OrbisNotificationRequest *)&req, sizeof(req), 0);
 }
 
 /* Manda el payload instalador (/data/ps4-installer.elf) al BinLoader de GoldHEN */

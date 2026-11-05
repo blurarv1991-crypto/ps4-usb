@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <unistd.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -331,23 +332,38 @@ static int guardar(FILE *f, libusb_device_handle *h, uint32_t handle, uint64_t t
     return (ok && hecho == tam) ? 0 : -1;
 }
 
-/* Prueba: se puede escribir en el disco externo (almacenamiento ampliado)? */
-static void probar_externo(FILE *f) {
-    const char *rutas[2] = {"/mnt/ext0/ps4-usb-prueba.txt", "/mnt/ext1/ps4-usb-prueba.txt"};
-    for (int i = 0; i < 2; i++) {
-        FILE *t = fopen(rutas[i], "wb");
-        if (t) {
-            fwrite("ok", 1, 2, t);
-            fclose(t);
-            unlink(rutas[i]);
-            fprintf(f, "externo: puedo escribir en %s\n", rutas[i]);
-            avisa("PS4 USB: SI puedo escribir en %s", rutas[i]);
-        } else {
-            fprintf(f, "externo: no puedo escribir en %s (errno=%d)\n", rutas[i], errno);
-            avisa("PS4 USB: NO puedo escribir en %s (errno=%d)", rutas[i], errno);
-        }
+/* Prueba: que carpetas ve la app? (para encontrar el disco externo) */
+static void ver_carpeta(FILE *f, const char *ruta) {
+    char lista[180];
+    size_t n = 0;
+    lista[0] = 0;
+    DIR *d = opendir(ruta);
+    if (!d) {
+        fprintf(f, "carpeta %s: no abre (errno=%d)\n", ruta, errno);
         fflush(f);
+        avisa("PS4 USB: no puedo abrir %s (errno=%d)", ruta, errno);
+        return;
     }
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.') continue;
+        fprintf(f, "  %s/%s\n", ruta, e->d_name);
+        size_t l = strlen(e->d_name);
+        if (n + l + 2 < sizeof(lista)) {
+            memcpy(lista + n, e->d_name, l);
+            n += l;
+            lista[n++] = ' ';
+            lista[n] = 0;
+        }
+    }
+    closedir(d);
+    fflush(f);
+    avisa("PS4 USB: %s contiene: %s", ruta, lista);
+}
+
+static void probar_externo(FILE *f) {
+    ver_carpeta(f, "/mnt");
+    ver_carpeta(f, "/");
 }
 
 int main(void) {

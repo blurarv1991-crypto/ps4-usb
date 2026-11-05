@@ -331,11 +331,31 @@ static int guardar(FILE *f, libusb_device_handle *h, uint32_t handle, uint64_t t
     return (ok && hecho == tam) ? 0 : -1;
 }
 
+/* Prueba: se puede escribir en el disco externo (almacenamiento ampliado)? */
+static void probar_externo(FILE *f) {
+    const char *rutas[2] = {"/mnt/ext0/ps4-usb-prueba.txt", "/mnt/ext1/ps4-usb-prueba.txt"};
+    for (int i = 0; i < 2; i++) {
+        FILE *t = fopen(rutas[i], "wb");
+        if (t) {
+            fwrite("ok", 1, 2, t);
+            fclose(t);
+            unlink(rutas[i]);
+            fprintf(f, "externo: puedo escribir en %s\n", rutas[i]);
+            avisa("PS4 USB: SI puedo escribir en %s", rutas[i]);
+        } else {
+            fprintf(f, "externo: no puedo escribir en %s (errno=%d)\n", rutas[i], errno);
+            avisa("PS4 USB: NO puedo escribir en %s (errno=%d)", rutas[i], errno);
+        }
+        fflush(f);
+    }
+}
+
 int main(void) {
     FILE *f = fopen("/data/ps4-usb.txt", "w");
     if (!f) return 1;
     int guardado_ok = 0;
     avisa("PS4 USB: buscando el celular...");
+    probar_externo(f);
 
     sceSysmoduleLoadModule(ORBIS_SYSMODULE_USBD);
     int r = sceUsbdInit();

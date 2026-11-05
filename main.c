@@ -18,6 +18,8 @@
 #define CAP    16384
 #define CH     262144
 #define MAXH   256
+#define PARTE  67108864u
+#define NOMBRE 256
 #define CARPETA_PKG "/data/pkg"
 #define RUTA_PKG    "/data/pkg/ps4-usb-prueba.pkg"
 #define RUTA_PAYLOAD "/data/ps4-installer.elf"
@@ -111,8 +113,8 @@ static unsigned long long kbs(uint64_t bytes, uint64_t us) {
     return (unsigned long long)(bytes * 1000000ULL / 1024ULL / us);
 }
 
-static int enviar(FILE *f, libusb_device_handle *h, uint16_t code, int np, uint32_t p1, uint32_t p2, uint32_t p3) {
-    uint8_t b[24];
+static int enviar(FILE *f, libusb_device_handle *h, uint16_t code, int np, uint32_t p1, uint32_t p2, uint32_t p3, uint32_t p4) {
+    uint8_t b[28];
     uint32_t len = 12 + 4 * np;
     tid++;
     wr32(b, len);
@@ -122,6 +124,7 @@ static int enviar(FILE *f, libusb_device_handle *h, uint16_t code, int np, uint3
     if (np > 0) wr32(b + 12, p1);
     if (np > 1) wr32(b + 16, p2);
     if (np > 2) wr32(b + 20, p3);
+    if (np > 3) wr32(b + 24, p4);
     int32_t tr = 0;
     int r = sceUsbdBulkTransfer(h, EP_OUT, b, (int32_t)len, &tr, 5000);
     if (ruido || r != 0) fprintf(f, "enviar 0x%04x: r=0x%x bytes=%d\n", code, r, tr);
@@ -190,7 +193,7 @@ static int recibir_datos(FILE *f, libusb_device_handle *h, int32_t *total) {
 static int info(FILE *f, libusb_device_handle *h, uint32_t handle, uint16_t *fmt, uint32_t *tam, char *nombre) {
     int32_t total = 0;
     nombre[0] = 0;
-    if (enviar(f, h, 0x1008, 1, handle, 0, 0) != 0) return -1;
+    if (enviar(f, h, 0x1008, 1, handle, 0, 0, 0) != 0) return -1;
     if (recibir_datos(f, h, &total) != 0) return -1;
     const uint8_t *p = datos + 12;
     if (total < 12 + 53) return -1;
@@ -199,7 +202,7 @@ static int info(FILE *f, libusb_device_handle *h, uint32_t handle, uint16_t *fmt
     int ln = p[52];
     int k = 0;
     if (12 + 53 + 2 * ln <= total) {
-        for (int i = 0; i < ln && k < 62; i++) {
+        for (int i = 0; i < ln && k < NOMBRE - 1; i++) {
             uint8_t lo = p[53 + 2 * i];
             uint8_t hi = p[53 + 2 * i + 1];
             if (lo == 0 && hi == 0) break;
@@ -215,7 +218,7 @@ static int listar(FILE *f, libusb_device_handle *h, uint32_t parent, uint32_t *h
     int32_t total = 0;
     *nh = 0;
     *cuenta = 0;
-    if (enviar(f, h, 0x1007, 3, 0x00010001, 0, parent) != 0) return -1;
+    if (enviar(f, h, 0x1007, 3, 0x00010001, 0, parent, 0) != 0) return -1;
     if (recibir_datos(f, h, &total) != 0) return -1;
     *cuenta = rd32(datos + 12);
     for (uint32_t i = 0; i < *cuenta && i < MAXH && (int32_t)(16 + 4 * i + 4) <= total; i++) {
@@ -225,63 +228,107 @@ static int listar(FILE *f, libusb_device_handle *h, uint32_t parent, uint32_t *h
     return 0;
 }
 
-/* Baja un archivo y lo guarda en la PS4, midiendo USB y escritura por separado */
-static int guardar(FILE *f, libusb_device_handle *h, uint32_t handle, uint32_t tam, const char *ruta) {
+static int es_pkg(const char *n) {
+    int len = (int)strlen(n);
+    if (len <= 4) return 0;
+    const char *e = n + len - 4;
+    return e[0] == '.' && (e[1] == 'p' || e[1] == 'P') && (e[2] == 'k' || e[2] == 'K') && (e[3] == 'g' || e[3] == 'G');
+}
+
+/* Tamano real (64 bits) de un objeto: hace falta para archivos de mas de 4 GB */
+static int tam64(FILE *f, libusb_device_handle *h, uint32_t handle, uint64_t *out) {
+    int32_t total = 0;
+    if (enviar(f, h, 0x9803, 2, handle, 0xDC04, 0, 0) != 0) return -1;
+    if (recibir_datos(f, h, &total) != 0) return -1;
+    int ok = total >= 12 + 8;
+    if (ok) *out = (uint64_t)rd32(datos + 12) | ((uint64_t)rd32(datos + 16) << 32);
+    respuesta(f, h);
+    return ok ? 0 : -1;
+}
+
+/* Baja un archivo por partes de 64 MB (GetPartialObject64) y lo guarda en la PS4 */
+static int guardar(FILE *f, libusb_device_handle *h, uint32_t handle, uint64_t tam, const char *ruta) {
     FILE *o = fopen(ruta, "wb");
     if (!o) {
         fprintf(f, "no pude crear %s\n", ruta);
         return -1;
     }
-    if (enviar(f, h, 0x1009, 1, handle, 0, 0) != 0) {
-        fclose(o);
-        return -1;
-    }
     uint64_t t0 = sceKernelGetProcessTime();
     uint64_t tw = 0;
-    int32_t got = 0;
-    int r = leer(h, chunk, CH, &got);
-    if (r != 0 || got < 12 || rd16(chunk + 4) != 2) {
-        fprintf(f, "guardar: r=0x%x bytes=%d\n", r, got);
-        fclose(o);
-        return -1;
-    }
-    uint32_t falta = rd32(chunk) - 12;
-    uint32_t hecho = (uint32_t)(got - 12);
-    uint64_t a = sceKernelGetProcessTime();
-    size_t w = fwrite(chunk + 12, 1, (size_t)(got - 12), o);
-    tw += sceKernelGetProcessTime() - a;
-    if (w != (size_t)(got - 12)) fprintf(f, "error escribiendo\n");
+    uint64_t hecho = 0;
+    uint64_t aviso = 1073741824ULL;
+    int ok = 1;
 
-    while (hecho < falta) {
-        got = 0;
-        r = leer(h, chunk, CH, &got);
-        if (r != 0 || got <= 0) {
-            fprintf(f, "guardar cortado: r=0x%x despues de %u bytes\n", r, hecho);
+    while (hecho < tam) {
+        uint64_t resto = tam - hecho;
+        uint32_t pedir = resto > PARTE ? PARTE : (uint32_t)resto;
+        if (enviar(f, h, 0x95C1, 4, handle, (uint32_t)(hecho & 0xFFFFFFFFULL), (uint32_t)(hecho >> 32), pedir) != 0) {
+            ok = 0;
             break;
         }
-        a = sceKernelGetProcessTime();
-        w = fwrite(chunk, 1, (size_t)got, o);
+        int32_t got = 0;
+        int r = leer(h, chunk, CH, &got);
+        if (r != 0 || got < 12 || rd16(chunk + 4) != 2) {
+            fprintf(f, "guardar: r=0x%x bytes=%d codigo=0x%04x despues de %llu bytes\n", r, got,
+                    got >= 8 ? rd16(chunk + 6) : 0, (unsigned long long)hecho);
+            ok = 0;
+            break;
+        }
+        uint32_t falta = rd32(chunk) - 12;
+        uint32_t parte = (uint32_t)(got - 12);
+        uint64_t a = sceKernelGetProcessTime();
+        size_t w = fwrite(chunk + 12, 1, (size_t)(got - 12), o);
         tw += sceKernelGetProcessTime() - a;
-        if (w != (size_t)got) {
-            fprintf(f, "error escribiendo despues de %u bytes\n", hecho);
+        if (w != (size_t)(got - 12)) {
+            fprintf(f, "error escribiendo despues de %llu bytes\n", (unsigned long long)hecho);
+            ok = 0;
             break;
         }
-        hecho += (uint32_t)got;
+        while (parte < falta) {
+            got = 0;
+            r = leer(h, chunk, CH, &got);
+            if (r != 0 || got <= 0) {
+                fprintf(f, "guardar cortado: r=0x%x despues de %llu bytes\n", r, (unsigned long long)(hecho + parte));
+                ok = 0;
+                break;
+            }
+            a = sceKernelGetProcessTime();
+            w = fwrite(chunk, 1, (size_t)got, o);
+            tw += sceKernelGetProcessTime() - a;
+            if (w != (size_t)got) {
+                fprintf(f, "error escribiendo despues de %llu bytes\n", (unsigned long long)(hecho + parte));
+                ok = 0;
+                break;
+            }
+            parte += (uint32_t)got;
+        }
+        hecho += parte;
+        if (!ok) break;
+        respuesta(f, h);
+        if (parte == 0) {
+            ok = 0;
+            break;
+        }
+        if (hecho >= aviso) {
+            avisa("PS4 USB: guardando... %llu de %llu MB", (unsigned long long)(hecho / 1048576ULL),
+                  (unsigned long long)(tam / 1048576ULL));
+            aviso += 1073741824ULL;
+        }
     }
-    a = sceKernelGetProcessTime();
+
+    uint64_t a2 = sceKernelGetProcessTime();
     fclose(o);
-    tw += sceKernelGetProcessTime() - a;
+    tw += sceKernelGetProcessTime() - a2;
 
     uint64_t total = sceKernelGetProcessTime() - t0;
     uint64_t tusb = total > tw ? total - tw : 1;
-    fprintf(f, "guardado %u de %u bytes en %s\n", hecho, tam, ruta);
+    fprintf(f, "guardado %llu de %llu bytes en %s\n", (unsigned long long)hecho, (unsigned long long)tam, ruta);
     fprintf(f, "total: %llu ms = %llu KB/s\n", (unsigned long long)(total / 1000), kbs(hecho, total));
     fprintf(f, "tiempo USB: %llu ms = %llu KB/s\n", (unsigned long long)(tusb / 1000), kbs(hecho, tusb));
     fprintf(f, "tiempo escribiendo: %llu ms = %llu KB/s\n", (unsigned long long)(tw / 1000), kbs(hecho, tw));
     fflush(f);
     g_kbs = kbs(hecho, total);
-    respuesta(f, h);
-    return (hecho == tam) ? 0 : -1;
+    return (ok && hecho == tam) ? 0 : -1;
 }
 
 int main(void) {
@@ -317,9 +364,9 @@ int main(void) {
                 uint32_t nh = 0, cuenta = 0, dl = 0;
                 uint16_t fmt = 0;
                 uint32_t tam = 0;
-                char nombre[64];
+                char nombre[NOMBRE];
 
-                enviar(f, h, 0x1002, 1, 1, 0, 0);
+                enviar(f, h, 0x1002, 1, 1, 0, 0, 0);
                 respuesta(f, h);
                 ruido = 0;
 
@@ -337,25 +384,37 @@ int main(void) {
                     fprintf(f, "no encontre la carpeta Download\n");
                     avisa("PS4 USB: no encontre la carpeta Download en el celular");
                 } else {
-                    uint32_t cand = 0, ctam = 0;
+                    uint32_t cand = 0;
+                    uint64_t ctam = 0;
+                    char cnombre[NOMBRE];
+                    cnombre[0] = 0;
                     if (listar(f, h, dl, hs, &nh, &cuenta) == 0) {
                         fprintf(f, "Download: %u objetos (reviso %u)\n", cuenta, nh);
-                        for (uint32_t i = 0; i < nh && !cand; i++) {
+                        for (uint32_t i = 0; i < nh; i++) {
                             if (info(f, h, hs[i], &fmt, &tam, nombre) != 0) continue;
-                            int len = (int)strlen(nombre);
-                            if (fmt != 0x3001 && tam > 1048576 && len > 4 &&
-                                strcmp(nombre + len - 4, ".pkg") == 0) {
+                            if (fmt == 0x3001 || !es_pkg(nombre)) continue;
+                            uint64_t t = tam;
+                            if (tam == 0xFFFFFFFFu) {
+                                t = 0;
+                                uint64_t t64 = 0;
+                                if (tam64(f, h, hs[i], &t64) == 0) t = t64;
+                                else fprintf(f, "no pude leer el tamano de %s\n", nombre);
+                            }
+                            fprintf(f, "pkg: %s (%llu bytes)\n", nombre, (unsigned long long)t);
+                            if (t > 1048576ULL && t > ctam) {
                                 cand = hs[i];
-                                ctam = tam;
-                                fprintf(f, "elegido: %s (%u bytes)\n", nombre, tam);
+                                ctam = t;
+                                strncpy(cnombre, nombre, NOMBRE - 1);
+                                cnombre[NOMBRE - 1] = 0;
                             }
                         }
+                        if (cand) fprintf(f, "elegido: %s (%llu bytes)\n", cnombre, (unsigned long long)ctam);
                     }
 
                     if (cand) {
                         ruido = 1;
                         mkdir(CARPETA_PKG, 0777);
-                        avisa("PS4 USB: guardando %s (%u MB)...", nombre, ctam / 1048576);
+                        avisa("PS4 USB: guardando %s (%llu MB)...", cnombre, (unsigned long long)(ctam / 1048576ULL));
                         if (guardar(f, h, cand, ctam, RUTA_PKG) == 0) {
                             guardado_ok = 1;
                             avisa("PS4 USB: guardado (%llu MB/s)", g_kbs / 1024);
@@ -369,7 +428,7 @@ int main(void) {
                 }
 
                 ruido = 1;
-                enviar(f, h, 0x1003, 0, 0, 0, 0);
+                enviar(f, h, 0x1003, 0, 0, 0, 0, 0);
                 respuesta(f, h);
                 sceUsbdReleaseInterface(h, 0);
             }

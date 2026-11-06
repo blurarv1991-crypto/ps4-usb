@@ -1,10 +1,10 @@
+/* REPO ps4-usb: app que copia el .pkg del celular por USB y manda el payload */
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdarg.h>
 #include <errno.h>
 #include <unistd.h>
-#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -332,46 +332,11 @@ static int guardar(FILE *f, libusb_device_handle *h, uint32_t handle, uint64_t t
     return (ok && hecho == tam) ? 0 : -1;
 }
 
-/* Prueba: que carpetas ve la app? (para encontrar el disco externo) */
-static void ver_carpeta(FILE *f, const char *ruta) {
-    char lista[180];
-    size_t n = 0;
-    lista[0] = 0;
-    DIR *d = opendir(ruta);
-    if (!d) {
-        fprintf(f, "carpeta %s: no abre (errno=%d)\n", ruta, errno);
-        fflush(f);
-        avisa("PS4 USB: no puedo abrir %s (errno=%d)", ruta, errno);
-        return;
-    }
-    struct dirent *e;
-    while ((e = readdir(d)) != NULL) {
-        if (e->d_name[0] == '.') continue;
-        fprintf(f, "  %s/%s\n", ruta, e->d_name);
-        size_t l = strlen(e->d_name);
-        if (n + l + 2 < sizeof(lista)) {
-            memcpy(lista + n, e->d_name, l);
-            n += l;
-            lista[n++] = ' ';
-            lista[n] = 0;
-        }
-    }
-    closedir(d);
-    fflush(f);
-    avisa("PS4 USB: %s contiene: %s", ruta, lista);
-}
-
-static void probar_externo(FILE *f) {
-    ver_carpeta(f, "/mnt");
-    ver_carpeta(f, "/");
-}
-
 int main(void) {
     FILE *f = fopen("/data/ps4-usb.txt", "w");
     if (!f) return 1;
     int guardado_ok = 0;
     avisa("PS4 USB: buscando el celular...");
-    probar_externo(f);
 
     sceSysmoduleLoadModule(ORBIS_SYSMODULE_USBD);
     int r = sceUsbdInit();
